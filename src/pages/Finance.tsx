@@ -1,0 +1,455 @@
+// src/pages/Finance.tsx
+import React, { useState, useEffect, useCallback } from 'react';
+import { useFinances } from '../hooks/useFinances';
+import { useFinanceFilters } from '../hooks/useFinanceFilters';
+import { useCustomers } from '../hooks/useCustomers';
+import { Account, Transaction, Customer } from '../types';
+import FinanceHeader from '../components/finance/FinanceHeader';
+import FinanceFilters from '../components/finance/FinanceFilters';
+import FinancialSummary from '../components/finance/FinancialSummary';
+import TransactionTable from '../components/finance/TransactionTable';
+import TransactionForm from '../components/finance/TransactionForm';
+import BulkChargeForm from '../components/finance/BulkChargeForm';
+import TransactionDetails from '../components/finance/TransactionDetails';
+import TransactionDeleteModal from '../components/finance/TransactionDeleteModal';
+import PayOutstandingModal from '../components/finance/PayOutstandingModal';
+import ManageGroupsModal from '../components/finance/ManageGroupsModal';
+import AssignGroupModal from '../components/finance/AssignGroupModal';
+import NotChargedCustomersModal from '../components/finance/NotChargedCustomersModal';
+import RefundModal from '../components/finance/RefundModal';
+import Modal from '../components/ui/Modal';
+import { generateFinancePDF } from '../utils/financePDF';
+import { generateAndUploadDocument, getCompanyDetails } from '../utils/documentGenerator';
+import { FinanceDocument } from '../components/pdf/documents';
+import ReceiptDocument from '../components/pdf/documents/ReceiptDocument';
+import { saveAs } from 'file-saver';
+import toast from 'react-hot-toast';
+import { collection, query, onSnapshot, doc, updateDoc, writeBatch } from 'firebase/firestore';
+import { db } from '../lib/firebase';
+import * as XLSX from 'xlsx';
+import { usePermissions } from '../hooks/usePermissions';
+import { useAuth } from '../context/AuthContext';
+import financeGroupService, { FinanceGroup } from '../services/financeGroup.service';
+import financeCategoryService from '../services/financeCategory.service';
+import ManageCategoriesModal from '../components/finance/ManageCategoriesModal';
+
+const Finance: React.FC = () => {
+  const { transactions, loading, error } = useFinances();
+  const { customers } = useCustomers();
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const { can } = usePermissions();
+  const { user } = useAuth();
+
+  const [groups, setGroups] = useState<FinanceGroup[]>([]);
+  const [manageOpen, setManageOpen] = useState(false);
+  useEffect(() => {
+    financeGroupService.getAll().then(setGroups).catch(() => toast.error('Failed to load groups'));
+  }, []);
+
+  const [financeCategories, setFinanceCategories] = useState<string[]>([]);
+  const fetchFinanceCategories = useCallback(() => {
+    financeCategoryService.getAll().then(docs => setFinanceCategories(docs.map(c => c.name).sort())).catch(() => toast.error('Failed to load categories'));
+  }, []);
+
+  useEffect(() => {
+    fetchFinanceCategories();
+  }, [fetchFinanceCategories]);
+
+  useEffect(() => {
+    const unsub = onSnapshot(query(collection(db, 'accounts')), snap => setAccounts(snap.docs.map(d => ({ id: d.id, ...(d.data() as any) }))), () => toast.error('Failed to load accounts'));
+    return () => unsub();
+  }, []);
+
+  const [selectedTransaction, setSelectedTransaction] = useState<Transaction | null>(null);
+  const [showAddIncome, setShowAddIncome] = useState(false);
+  const [showAddExpense, setShowAddExpense] = useState(false);
+  const [showAddInCredit, setShowAddInCredit] = useState(false);
+  const [showBulkCharge, setShowBulkCharge] = useState(false);
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [showDetailsModal, setShowDetailsModal] = useState(false);
+  const [showPayOutstandingModal, setShowPayOutstandingModal] = useState(false);
+  const [showCategoryModal, setShowCategoryModal] = useState(false);
+  const [assignTxn, setAssignTxn] = useState<Transaction | null>(null);
+  const [assignOpen, setAssignOpen] = useState(false);
+  const [showNotChargedModal, setShowNotChargedModal] = useState(false);
+  const [showRefundModal, setShowRefundModal] = useState(false);
+
+  const {
+    searchQuery, setSearchQuery,
+    type, setType,
+    category, setCategory,
+    groupFilter, setGroupFilter,
+    paymentStatus, setPaymentStatus,
+    dateRange, setDateRange,
+    selectedCustomerId, setSelectedCustomerId,
+    filteredTransactions,
+    customerInCreditBalances,
+    totalOwingFromOwners,
+    unchargedCustomers,
+  } = useFinanceFilters(transactions, accounts, customers);
+
+  const activeCustomers = customers.filter(c => c.status === 'ACTIVE');
+
+  const handleConvertToInCredit = async (tx: Transaction) => {
+    if (!tx.id || tx.type !== 'income' || tx.paymentStatus !== 'paid') {
+        toast.error("Only paid income transactions can be converted to in-credit.");
+        return;
+    }
+    
+    toast((t) => (
+      <div className="flex flex-col items-center p-2">
+        <p className="text-center mb-4">Are you sure you want to convert this income transaction to in-credit for the customer? This action cannot be undone.</p>
+        <div className="flex space-x-2">
+          <button
+            className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700"
+            onClick={async () => {
+              toast.dismiss(t.id);
+              try {
+                  toast.loading("Converting to in-credit...");
+                  const txRef = doc(db, 'transactions', tx.id);
+                  await updateDoc(txRef, {
+                      type: 'in-credit',
+                      remainingAmount: tx.amount,
+                      paidAmount: 0,
+                      paymentStatus: 'unpaid',
+                      category: 'In-Credit',
+                      description: `Converted from income transaction: ${tx.description}`,
+                      updatedAt: new Date()
+                  });
+                  toast.dismiss();
+                  toast.success("Transaction converted to in-credit.");
+              } catch(err) {
+                  toast.dismiss();
+                  toast.error("Failed to convert transaction.");
+                  console.error(err);
+              }
+            }}
+          >
+            Confirm
+          </button>
+          <button
+            className="px-4 py-2 bg-gray-300 text-gray-800 rounded-md hover:bg-gray-400"
+            onClick={() => toast.dismiss(t.id)}
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    ), { duration: Infinity });
+  }
+
+  const handleGeneratePDF = useCallback(async () => {
+    try {
+      toast.loading('Generating report…');
+      const company = await getCompanyDetails();
+      const totalIncome = filteredTransactions.filter(t => t.type === 'income').reduce((sum, t) => sum + t.amount, 0);
+      const totalExpenses = filteredTransactions.filter(t => t.type === 'expense').reduce((sum, t) => sum + t.amount, 0);
+      const balance = totalIncome - totalExpenses;
+
+      const blob = await generateFinancePDF(
+        filteredTransactions,
+        customers,
+        accounts,
+        totalIncome,
+        totalExpenses,
+        balance,
+        0, 
+        totalOwingFromOwners,
+        dateRange.start,
+        dateRange.end,
+        company!
+      );
+      saveAs(blob, 'finance_report.pdf');
+      toast.dismiss();
+      toast.success('PDF ready');
+    } catch(err) {
+      toast.dismiss();
+      toast.error('Failed to generate PDF');
+      console.error(err);
+    }
+  }, [
+    filteredTransactions,
+    customers,
+    accounts,
+    totalOwingFromOwners,
+    dateRange,
+  ]);
+
+  const handleGenerateDocument = useCallback(async (tx: Transaction) => {
+    if (!user) return toast.error('Login required');
+    try {
+      toast.loading('Generating document…');
+      const company = await getCompanyDetails();
+      const url = await generateAndUploadDocument(
+        FinanceDocument,
+        tx,
+        'finance',
+        tx.id,
+        'transactions',
+        company!,
+        { customers: customers }
+      );
+      await updateDoc(doc(db, 'transactions', tx.id), { documentUrl: url });
+      toast.dismiss();
+      toast.success('Document generated');
+      window.open(url, '_blank');
+    } catch(err) {
+      toast.dismiss();
+      toast.error('Failed to generate document');
+      console.error(err);
+    }
+  }, [user, customers]);
+
+  const handlePrintReceipt = useCallback(async (tx: Transaction) => {
+    if (!user) return toast.error('Login required');
+    try {
+      toast.loading('Generating receipt…');
+      const company = await getCompanyDetails();
+      const customerForReceipt = customers.find(c => c.id === tx.customerId);
+      const url = await generateAndUploadDocument(
+        ReceiptDocument,
+        tx,
+        'finance',
+        tx.id,
+        'transactions',
+        company!,
+        { customer: customerForReceipt }
+      );
+      await updateDoc(doc(db, 'transactions', tx.id), { receiptUrl: url });
+      toast.dismiss();
+      toast.success('Receipt generated');
+      window.open(url, '_blank');
+    } catch(err) {
+      toast.dismiss();
+      toast.error('Failed to generate receipt');
+      console.error(err);
+    }
+  }, [user, customers]);
+
+  const handleExport = useCallback(() => {
+    try {
+      toast.loading("Generating Excel file...");
+      const data = filteredTransactions.map(tx => ({
+        'Date': tx.date.toLocaleDateString(),
+        'Type': tx.type,
+        'Category': tx.category,
+        'Description': tx.description,
+        'Amount': tx.amount,
+        'Paid Amount': tx.paidAmount ?? 0,
+        'Remaining Amount': tx.remainingAmount ?? tx.amount,
+        'Payment Status': tx.paymentStatus,
+        'Customer Name': customers.find(c => c.id === tx.customerId)?.fullName || tx.customerName || 'N/A',
+        'Payment Method': tx.paymentMethod || 'N/A',
+        'Payment Reference': tx.paymentReference || 'N/A',
+      }));
+      const ws = XLSX.utils.json_to_sheet(data);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Transactions');
+      XLSX.writeFile(wb, 'transactions_export.xlsx');
+      toast.dismiss();
+      toast.success('Excel file exported successfully!');
+    } catch(err) {
+      toast.dismiss();
+      toast.error('Export failed.');
+      console.error(err);
+    }
+  }, [filteredTransactions, customers]);
+
+  const handleImport = useCallback(async (file: File) => {
+    if (!user) {
+        toast.error("You must be logged in to import transactions.");
+        return;
+    }
+    toast.loading("Processing imported file...");
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+        try {
+            const data = e.target?.result;
+            const workbook = XLSX.read(data, { type: 'binary' });
+            const sheetName = workbook.SheetNames[0];
+            const worksheet = workbook.Sheets[sheetName];
+            const json: any[] = XLSX.utils.sheet_to_json(worksheet);
+
+            if (json.length === 0) {
+                toast.dismiss();
+                toast.error("The imported file is empty or in the wrong format.");
+                return;
+            }
+
+            const batch = writeBatch(db);
+            json.forEach((row) => {
+                const newTransaction = {
+                    type: row['Type'] || 'income',
+                    date: row['Date'] ? new Date(row['Date']) : new Date(),
+                    amount: parseFloat(row['Amount'] || '0'),
+                    category: row['Category'] || 'Uncategorized',
+                    description: row['Description'] || '',
+                    paymentStatus: row['Payment Status'] || 'paid',
+                    customerName: row['Customer Name'] || '',
+                    createdAt: new Date(),
+                    createdBy: user.name || user.email || 'Import',
+                };
+
+                if (newTransaction.amount > 0) {
+                    const newDocRef = doc(collection(db, "transactions"));
+                    batch.set(newDocRef, newTransaction);
+                }
+            });
+
+            await batch.commit();
+            toast.dismiss();
+            toast.success(`${json.length} transactions imported successfully!`);
+        } catch (err) {
+            toast.dismiss();
+            toast.error("Failed to process the file. Please check the format and try again.");
+            console.error(err);
+        }
+    };
+    reader.onerror = () => {
+        toast.dismiss();
+        toast.error("Failed to read the file.");
+    };
+    reader.readAsBinaryString(file);
+  }, [user]);
+
+
+  if (loading) return <div className="flex items-center justify-center h-full"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary" /></div>;
+  if (error) return <div className="text-red-500 py-8 text-center">{error}</div>;
+
+  return (
+    <div className="space-y-6 p-4">
+      <FinancialSummary transactions={filteredTransactions} />
+
+      <FinanceHeader
+        onSearch={setSearchQuery}
+        onImport={handleImport}
+        onExport={handleExport}
+        onAddIncome={() => setShowAddIncome(true)}
+        onAddExpense={() => setShowAddExpense(true)}
+        onAddInCredit={() => setShowAddInCredit(true)}
+        onBulkCharge={() => setShowBulkCharge(true)}
+        onGeneratePDF={handleGeneratePDF}
+        period="month"
+        onPeriodChange={() => {}}
+        type={type as any}
+        onTypeChange={setType as any}
+        onManageGroups={() => setManageOpen(true)}
+        onManageCategories={() => setShowCategoryModal(true)}
+      />
+
+      <FinanceFilters
+        type={type as any}
+        onTypeChange={setType as any}
+        statusFilter={paymentStatus}
+        onStatusFilterChange={setPaymentStatus}
+        categoryFilter={category}
+        onCategoryFilterChange={setCategory}
+        dateRange={dateRange}
+        onDateRangeChange={setDateRange}
+        customers={customers}
+        selectedCustomerId={selectedCustomerId}
+        onCustomerChange={setSelectedCustomerId}
+        categories={financeCategories}
+        groupFilter={groupFilter}
+        onGroupFilterChange={setGroupFilter}
+        groupOptions={groups.map(g => ({ id: g.id, name: g.name }))}
+        onShowUncharged={() => setShowNotChargedModal(true)}
+      />
+
+      <TransactionTable
+        transactions={filteredTransactions}
+        customers={customers}
+        accounts={accounts}
+        customerInCreditBalances={customerInCreditBalances}
+        onView={tx => { setSelectedTransaction(tx); setShowDetailsModal(true); }}
+        onEdit={tx => { setSelectedTransaction(tx); setShowEditModal(true); }}
+        onDelete={tx => { setSelectedTransaction(tx); setShowDeleteModal(true); }}
+        onPayOutstanding={tx => { setSelectedTransaction(tx); setShowPayOutstandingModal(true); }}
+        onConvertToInCredit={handleConvertToInCredit}
+        onGenerateDocument={handleGenerateDocument}
+        onViewDocument={url => window.open(url, '_blank')}
+        onPrintReceipt={handlePrintReceipt}
+        onAssign={tx => { setAssignTxn(tx); setAssignOpen(true); }}
+        onRefund={tx => { setSelectedTransaction(tx); setShowRefundModal(true); }}
+        groups={groups.map(g => ({ id: g.id, name: g.name }))}
+      />
+
+      {/* Add/Edit Modals */}
+      <Modal isOpen={showAddIncome || showAddExpense} onClose={() => { setShowAddIncome(false); setShowAddExpense(false); }} title={`Add ${showAddIncome ? 'Income' : 'Expense'}`} size="xl">
+        <TransactionForm type={showAddIncome ? 'income' : 'expense'} accounts={accounts} customers={customers} onClose={() => { setShowAddIncome(false); setShowAddExpense(false); }} />
+      </Modal>
+
+      <Modal isOpen={showEditModal} onClose={() => { setShowEditModal(false); setSelectedTransaction(null); }} title="Edit Transaction" size="xl">
+        {selectedTransaction && (
+          <TransactionForm type={selectedTransaction.type as any} transaction={selectedTransaction} accounts={accounts} customers={customers} onClose={() => { setShowEditModal(false); setSelectedTransaction(null); }} />
+        )}
+      </Modal>
+
+      {/* Other Feature Modals */}
+      <Modal isOpen={showAddInCredit} onClose={() => setShowAddInCredit(false)} title="Add In-Credit to Customer" size="xl">
+        <TransactionForm type="in-credit" accounts={accounts} customers={customers} onClose={() => setShowAddInCredit(false)} />
+      </Modal>
+
+      {can('finance', 'create') && (
+        <Modal isOpen={showBulkCharge} onClose={() => setShowBulkCharge(false)} title="Bulk Customer Charge" size="xl">
+          <BulkChargeForm accounts={accounts} customers={activeCustomers} onClose={() => setShowBulkCharge(false)} />
+        </Modal>
+      )}
+      
+      {selectedTransaction && showPayOutstandingModal && (
+        <Modal isOpen={showPayOutstandingModal} onClose={() => setShowPayOutstandingModal(false)} title="Pay Outstanding" size="lg">
+          <PayOutstandingModal
+            transaction={selectedTransaction}
+            customerInCreditBalance={customerInCreditBalances[selectedTransaction.customerId || ''] || 0}
+            onClose={() => setShowPayOutstandingModal(false)}
+            onSuccess={() => {
+              setShowPayOutstandingModal(false);
+              setSelectedTransaction(null);
+            }}
+          />
+        </Modal>
+      )}
+
+      {/* Details and Delete Modals */}
+      <Modal isOpen={showDetailsModal} onClose={() => { setShowDetailsModal(false); setSelectedTransaction(null); }} title="Transaction Details" size="2xl">
+        {selectedTransaction && (
+          <TransactionDetails transaction={selectedTransaction} customer={selectedTransaction.customerId ? customers.find(c => c.id === selectedTransaction.customerId) : undefined} accounts={accounts} />
+        )}
+      </Modal>
+
+      <Modal isOpen={showDeleteModal} onClose={() => { setShowDeleteModal(false); setSelectedTransaction(null); }} title="Delete Transaction" size="md">
+        {selectedTransaction && (
+          <TransactionDeleteModal transactionId={selectedTransaction.id} onClose={() => { setShowDeleteModal(false); setSelectedTransaction(null); }} />
+        )}
+      </Modal>
+      
+      {/* Management Modals */}
+      <ManageGroupsModal open={manageOpen} onClose={() => { setManageOpen(false); financeGroupService.getAll().then(setGroups); }} />
+
+      {assignTxn && (
+        <AssignGroupModal open={assignOpen} txn={assignTxn} groups={groups} onClose={() => setAssignOpen(false)} onAssigned={() => { setAssignOpen(false); }} />
+      )}
+      
+      <Modal isOpen={showCategoryModal} onClose={() => setShowCategoryModal(false)} title="Manage Categories" size="lg">
+        <ManageCategoriesModal onClose={() => { setShowCategoryModal(false); fetchFinanceCategories(); }} />
+      </Modal>
+
+      <Modal isOpen={showNotChargedModal} onClose={() => setShowNotChargedModal(false)} title="Active Customers with No Charges" size="2xl">
+        <NotChargedCustomersModal customers={unchargedCustomers} onClose={() => setShowNotChargedModal(false)} />
+      </Modal>
+
+      {selectedTransaction && showRefundModal && (
+        <Modal isOpen={showRefundModal} onClose={() => setShowRefundModal(false)} title="Refund In-Credit" size="lg">
+          <RefundModal 
+            transaction={selectedTransaction} 
+            onClose={() => {setShowRefundModal(false); setSelectedTransaction(null);}} 
+            onSuccess={() => {setShowRefundModal(false); setSelectedTransaction(null);}} 
+          />
+        </Modal>
+      )}
+    </div>
+  );
+};
+
+export default Finance;

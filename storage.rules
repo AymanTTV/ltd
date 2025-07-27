@@ -1,0 +1,46 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isAdmin() {
+      return isAuthenticated() && 
+        firestore.get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+    
+    function isManager() {
+      return isAuthenticated() && 
+        firestore.get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'manager';
+    }
+
+    // Allow read access to all authenticated users
+    match /{allPaths=**} {
+      allow read: if isAuthenticated();
+    }
+
+    // Profile pictures
+    match /profile-pictures/{userId} {
+      allow write: if isAuthenticated() && 
+        (request.auth.uid == userId || isAdmin());
+    }
+
+    // Vehicle images
+    match /vehicles/{vehicleId}/{fileName} {
+      allow write: if isAuthenticated() && 
+        (isAdmin() || isManager());
+    }
+
+    // Rental documents
+    match /rentals/{rentalId}/{fileName} {
+      allow write: if isAuthenticated() && 
+        (isAdmin() || isManager());
+    }
+
+    // Claims documents
+    match /claims/{claimId}/{fileName} {
+      allow write: if isAuthenticated();
+    }
+  }
+}
