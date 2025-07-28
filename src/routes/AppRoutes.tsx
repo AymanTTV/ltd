@@ -1,6 +1,8 @@
+// src/routes/AppRoutes.tsx
 import React, { lazy, Suspense } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import Layout from '../components/Layout';
+import MemberLayout from '../components/MemberLayout';
 import ProtectedRoute from '../components/ProtectedRoute';
 import { useAuth } from '../context/AuthContext';
 import { ROUTES } from './index';
@@ -11,22 +13,38 @@ const spinner = (
   </div>
 );
 
-const Login      = lazy(() => import('../pages/Login'));
-const AdminSetup = lazy(() => import('../pages/AdminSetup'));
-const Dashboard  = lazy(() => import('../pages/Dashboard'));
-const Profile    = lazy(() => import('../pages/Profile'));
-const Chat       = lazy(() => import('../pages/Chat'));
-const Finance    = lazy(() => import('../pages/Finance'));
-const Invoices   = lazy(() => import('../pages/Invoices'));
-const Customers  = lazy(() => import('../pages/Customers'));
-const Users      = lazy(() => import('../pages/Users'));
-const Company    = lazy(() => import('../pages/CompanyManagers'));
+// — Admin Pages —
+const Login       = lazy(() => import('../pages/Login'));
+const AdminSetup  = lazy(() => import('../pages/AdminSetup'));
+const Dashboard   = lazy(() => import('../pages/Dashboard'));
+const Profile     = lazy(() => import('../pages/Profile'));
+const Chat        = lazy(() => import('../pages/Chat'));
+const Finance     = lazy(() => import('../pages/Finance'));
+const Invoices    = lazy(() => import('../pages/Invoices'));
+const Customers   = lazy(() => import('../pages/Customers'));
+const Users       = lazy(() => import('../pages/Users'));
+const Company     = lazy(() => import('../pages/CompanyManagers'));
+
+// — Member Pages —
+const MemberAuth      = lazy(() => import('../pages/members/MembersAuth'));
+const MemberLogin     = lazy(() => import('../pages/members/MemberLogin'));
+const MemberRegister  = lazy(() => import('../pages/members/Register'));
+const MemberDashboard = lazy(() => import('../pages/members/MemberDashboard'));
+const MemberProfile   = lazy(() => import('../pages/members/MemberProfile'));
+const MemberFinance   = lazy(() => import('../pages/members/MemberFinance'));
+const MemberClaims    = lazy(() => import('../pages/members/MemberClaims'));
 
 export default function AppRoutes() {
+  // pull our badgeNumber out of localStorage for the member
+  const sessionStr  = localStorage.getItem('memberSession');
+  const badgeNumber = sessionStr ? JSON.parse(sessionStr).badgeNumber : undefined;
+
   return (
     <Suspense fallback={spinner}>
       <Routes>
-        <Route path={ROUTES.LOGIN} element={<Login />} />
+
+        {/* — Admin Portal — */}
+        <Route path={ROUTES.LOGIN}      element={<Login />} />
         <Route path={ROUTES.ADMIN_SETUP} element={<AdminSetup />} />
 
         <Route
@@ -37,7 +55,6 @@ export default function AppRoutes() {
             </ProtectedRoute>
           }
         />
-
         <Route
           path={ROUTES.PROFILE}
           element={
@@ -46,7 +63,6 @@ export default function AppRoutes() {
             </ProtectedRoute>
           }
         />
-
         <Route
           path={ROUTES.CHAT}
           element={
@@ -55,7 +71,6 @@ export default function AppRoutes() {
             </ProtectedRoute>
           }
         />
-
         <Route
           path={ROUTES.FINANCE}
           element={
@@ -64,7 +79,6 @@ export default function AppRoutes() {
             </ProtectedRoute>
           }
         />
-
         <Route
           path={ROUTES.INVOICES}
           element={
@@ -73,7 +87,6 @@ export default function AppRoutes() {
             </ProtectedRoute>
           }
         />
-
         <Route
           path={ROUTES.CUSTOMERS}
           element={
@@ -82,7 +95,6 @@ export default function AppRoutes() {
             </ProtectedRoute>
           }
         />
-
         <Route
           path={ROUTES.USERS}
           element={
@@ -91,8 +103,6 @@ export default function AppRoutes() {
             </ProtectedRoute>
           }
         />
-
-        {/* manager-only Company page */}
         <Route
           path={ROUTES.COMPANY}
           element={
@@ -104,16 +114,82 @@ export default function AppRoutes() {
           }
         />
 
+        {/* — Member Portal — */}
+        <Route path="/members/auth"     element={<MemberAuth />} />
+        <Route path="/members/login"    element={<MemberLogin />} />
+        <Route path="/members/register" element={<MemberRegister />} />
+
+        <Route
+          path="/members/dashboard"
+          element={
+            <RequireMember>
+              <MemberLayout>
+                <MemberDashboard
+                  filterByBadge={badgeNumber}
+                  memberMode
+                />
+              </MemberLayout>
+            </RequireMember>
+          }
+        />
+
+        <Route
+          path="/members/finance"
+          element={
+            <RequireMember>
+              <MemberLayout>
+                <MemberFinance
+                  filterByBadge={badgeNumber}
+                  memberMode
+                />
+              </MemberLayout>
+            </RequireMember>
+          }
+        />
+
+        <Route
+          path="/members/claims"
+          element={
+            <RequireMember>
+              <MemberLayout>
+                <MemberClaims
+                  filterByBadge={badgeNumber}
+                  memberMode
+                />
+              </MemberLayout>
+            </RequireMember>
+          }
+        />
+
+        <Route
+          path="/members/profile"
+          element={
+            <RequireMember>
+              <MemberLayout>
+                <MemberProfile />
+              </MemberLayout>
+            </RequireMember>
+          }
+        />
+
         <Route path="*" element={<Navigate to={ROUTES.DASHBOARD} replace />} />
       </Routes>
     </Suspense>
   );
 }
 
+// Admin-only guard
 function RequireManager({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();
-  if (user?.role !== 'manager') {
-    return <Navigate to={ROUTES.DASHBOARD} replace />;
-  }
-  return <>{children}</>;
+  return user?.role === 'manager'
+    ? <>{children}</>
+    : <Navigate to={ROUTES.DASHBOARD} replace />;
+}
+
+// Member-only guard
+function RequireMember({ children }: { children: React.ReactNode }) {
+  const session = localStorage.getItem('memberSession');
+  return session
+    ? <>{children}</>
+    : <Navigate to="/members/login" replace />;
 }

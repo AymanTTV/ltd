@@ -34,6 +34,8 @@ export const useCustomers = () => {
         badgeNumber: d.badgeNumber,
         status: (d.status as Customer['status']) || 'ACTIVE',
         photoUrl: d.photoUrl,
+        pendingApproval: d.pendingApproval || false,
+        pendingUpdates: d.pendingUpdates || {},
         signature: d.signature,
         billDocumentUrl: d.billDocumentUrl,
         licenseType: d.licenseType,

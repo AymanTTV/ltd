@@ -27,6 +27,8 @@ export interface Customer {
   licenseFrontUrl?: string;
   licenseBackUrl?: string;
   billDocumentUrl?: string;
+  pendingApproval?: boolean;
+  pendingUpdates?: Partial<Omit<Customer, 'id' | 'pendingApproval'>>;
   licenseType: 'Green' | 'Yellow';
   originalRegion:
     | 'NORTH LONDON'
